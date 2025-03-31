@@ -74,6 +74,11 @@ const inputTabs = [
   { id: "voice", label: "Voice", icon: <Mic className="h-4 w-4" /> },
 ];
 
+// Local storage keys
+const USER_ID_KEY = "woofUserId";
+const MESSAGES_REMAINING_KEY = "woofMessagesRemaining";
+const DEFAULT_MESSAGES = 5;
+
 export default function ChatInterface() {
   // State
   const [activeTab, setActiveTab] = useState<string>("text");
@@ -81,32 +86,28 @@ export default function ChatInterface() {
   const [voiceMessages, setVoiceMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [textMessagesRemaining, setTextMessagesRemaining] = useState(5);
-  const [voiceMessagesRemaining, setVoiceMessagesRemaining] = useState(5);
+  const [messagesRemaining, setMessagesRemaining] = useState(DEFAULT_MESSAGES);
   const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
   const messageIdCounter = useRef(0);
 
-  // Get active messages and messages remaining based on current tab
+  // Get active messages based on current tab
   const activeMessages = activeTab === "text" ? textMessages : voiceMessages;
-  const activeMessagesRemaining =
-    activeTab === "text" ? textMessagesRemaining : voiceMessagesRemaining;
 
-  // Set user ID on first load
+  // Initialize user and message count from local storage
   useEffect(() => {
-    const savedUserId = localStorage.getItem("woofUserId");
-    const messagesRemaining = localStorage.getItem("woofMessagesRemaining");
+    // Set user ID if not already set
+    const savedUserId = localStorage.getItem(USER_ID_KEY);
     if (!savedUserId) {
       const newUserId = `user-${Math.random().toString(36).substring(2, 15)}`;
-      localStorage.setItem("woofUserId", newUserId);
+      localStorage.setItem(USER_ID_KEY, newUserId);
     }
-    if (!messagesRemaining) {
-      localStorage.setItem("woofMessagesRemaining", "90");
-    }
-    console.log("User ID:", savedUserId);
-    console.log("Messages remaining:", messagesRemaining);
-    const remaining = parseInt(messagesRemaining || "5", 10);
-    setVoiceMessagesRemaining(remaining);
-    setTextMessagesRemaining(remaining);
+
+    // Get remaining messages count
+    const remaining = localStorage.getItem(MESSAGES_REMAINING_KEY);
+    const remainingCount = remaining
+      ? parseInt(remaining, 10)
+      : DEFAULT_MESSAGES;
+    setMessagesRemaining(remainingCount);
   }, []);
 
   // Generate unique message ID
@@ -120,10 +121,18 @@ export default function ChatInterface() {
     setInputValue(e.target.value);
   };
 
+  // Update messages remaining in state and local storage
+  const decrementMessages = () => {
+    setMessagesRemaining((prev) => {
+      const newValue = Math.max(0, prev - 1);
+      localStorage.setItem(MESSAGES_REMAINING_KEY, newValue.toString());
+      return newValue;
+    });
+  };
+
   // Handle message submission for text chat
   const handleTextSubmit = async () => {
-    if (inputValue.trim() === "" || textMessagesRemaining <= 0 || isLoading)
-      return;
+    if (inputValue.trim() === "" || messagesRemaining <= 0 || isLoading) return;
 
     // Add user message
     const newUserMessage: Message = {
@@ -138,7 +147,7 @@ export default function ChatInterface() {
     const userInput = inputValue; // Store the input value
     setInputValue("");
     setIsLoading(true);
-    setTextMessagesRemaining((prev) => prev - 1);
+    decrementMessages();
 
     try {
       // Send request to the API with conversation history
@@ -187,17 +196,14 @@ export default function ChatInterface() {
 
   // Handle voice messages from realtime API
   const handleVoiceMessage = (transcript: string) => {
-    if (voiceMessagesRemaining <= 0) return;
+    if (messagesRemaining <= 0) return;
 
     // Create a new message based on who sent it (determined by context)
-    // If this is a user message from RealtimeVoiceInput, it will be marked as 'user'
-    // If this is an AI response, it will be marked as 'ai'
     const message: Message = {
       id: generateMessageId(),
       content: transcript,
-      // The RealtimeVoiceInput component will send both user transcripts and AI responses,
-      // but we can't reliably distinguish them here, so we'll always treat them as AI messages
-      // and let the component handle user messages internally
+      // This will always be treated as AI message since we've fixed the voice input
+      // component to combine multiple pieces of a response
       sender: "ai",
       timestamp: new Date(),
     };
@@ -205,9 +211,10 @@ export default function ChatInterface() {
     // Update voice messages state
     setVoiceMessages((prev) => [...prev, message]);
 
-    // Decrement message count only if we haven't already counted this message
-    if (voiceMessagesRemaining > 0 && message.sender === "ai") {
-      setVoiceMessagesRemaining((prev) => Math.max(0, prev - 1));
+    // Decrement message count only if this is an AI response message
+    // and we have messages remaining
+    if (messagesRemaining > 0 && message.sender === "ai") {
+      decrementMessages();
     }
   };
 
@@ -260,7 +267,7 @@ export default function ChatInterface() {
               variant="outline"
               className="bg-background/80 backdrop-blur-sm"
             >
-              {activeMessagesRemaining} messages remaining
+              {messagesRemaining} messages remaining
             </Badge>
           </motion.div>
         ) : (
@@ -380,10 +387,10 @@ export default function ChatInterface() {
                   >
                     <ChatInputTextArea
                       placeholder="Type woof, bark, growl..."
-                      disabled={isLoading || textMessagesRemaining <= 0}
+                      disabled={isLoading || messagesRemaining <= 0}
                     />
                     <ChatInputSubmit
-                      disabled={isLoading || textMessagesRemaining <= 0}
+                      disabled={isLoading || messagesRemaining <= 0}
                     />
                   </ChatInput>
                 </motion.div>
@@ -396,14 +403,14 @@ export default function ChatInterface() {
                   transition={{ duration: 0.2 }}
                   layout
                 >
-                  {voiceMessagesRemaining > 0 ? (
+                  {messagesRemaining > 0 ? (
                     <div className="border border-input rounded-xl bg-background mb-4">
                       <RealtimeVoiceInput
                         onStart={handleVoiceStart}
                         onStop={handleVoiceStop}
                         onMessage={handleVoiceMessage}
                         visualizerBars={32}
-                        disabled={voiceMessagesRemaining <= 0}
+                        disabled={messagesRemaining <= 0}
                       />
                     </div>
                   ) : (

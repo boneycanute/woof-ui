@@ -28,6 +28,9 @@ const DOG_SOUNDS = [
   "Yap yap!",
 ];
 
+// Maximum recording time in seconds
+const MAX_RECORDING_TIME = 10;
+
 export function RealtimeVoiceInput({
   onStart,
   onStop,
@@ -38,20 +41,30 @@ export function RealtimeVoiceInput({
 }: RealtimeVoiceInputProps) {
   // State
   const [isListening, setIsListening] = useState(false);
-  const [time, setTime] = useState(0);
+  const [remainingTime, setRemainingTime] = useState(MAX_RECORDING_TIME);
   const [isConnecting, setIsConnecting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<string>("disconnected");
+  const [isProcessingResponse, setIsProcessingResponse] = useState(false);
 
   // Refs
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const processedEventIdsRef = useRef<Set<string>>(new Set());
   const lastMessageWasFromUserRef = useRef<boolean>(false);
+  const messageAlreadySentRef = useRef(false);
+
+  // Complete message buffer for the entire response
+  const completeResponseRef = useRef<string>("");
+  const responseEndTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // State update flag refs - to avoid React state update during render
+  const shouldProcessResponseRef = useRef(false);
+  const shouldStopListeningRef = useRef(false);
 
   // Create audio element for playback
   useEffect(() => {
@@ -66,20 +79,44 @@ export function RealtimeVoiceInput({
     }
   }, []);
 
-  // Handle timer for conversation duration
+  // Handle state updates based on flag refs
   useEffect(() => {
-    if (isListening && !timerRef.current) {
-      timerRef.current = setInterval(() => {
-        setTime((t) => t + 1);
+    if (shouldProcessResponseRef.current) {
+      setIsProcessingResponse(true);
+      shouldProcessResponseRef.current = false;
+    }
+
+    if (shouldStopListeningRef.current) {
+      setIsListening(false);
+      shouldStopListeningRef.current = false;
+    }
+  });
+
+  // Handle countdown timer for recording duration
+  useEffect(() => {
+    if (isListening && !countdownTimerRef.current) {
+      // Reset the timer to max when starting
+      setRemainingTime(MAX_RECORDING_TIME);
+
+      countdownTimerRef.current = setInterval(() => {
+        setRemainingTime((t) => {
+          // When time reaches 0, stop recording
+          if (t <= 1) {
+            stopRealtimeSession();
+            return 0;
+          }
+          return t - 1;
+        });
       }, 1000);
-    } else if (!isListening && timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+    } else if (!isListening && countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
     }
 
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
       }
     };
   }, [isListening]);
@@ -91,6 +128,10 @@ export function RealtimeVoiceInput({
       setErrorMessage(null);
       setConnectionStatus("connecting");
       processedEventIdsRef.current.clear();
+      completeResponseRef.current = "";
+      setRemainingTime(MAX_RECORDING_TIME);
+      setIsProcessingResponse(false);
+      messageAlreadySentRef.current = false;
 
       // 1. Get ephemeral token from our API
       const ephemeralToken = await getRealtimeToken();
@@ -107,15 +148,12 @@ export function RealtimeVoiceInput({
 
       // Set up connection monitoring
       pc.oniceconnectionstatechange = () => {
-        console.log("ICE connection state:", pc.iceConnectionState);
         if (
           ["failed", "disconnected", "closed"].includes(pc.iceConnectionState)
         ) {
           setConnectionStatus("disconnected");
           if (isListening) {
-            console.log("Connection lost. Will try to reconnect...");
             stopRealtimeSession();
-            setTimeout(() => startRealtimeSession(), 2000);
           }
         } else if (["connected", "completed"].includes(pc.iceConnectionState)) {
           setConnectionStatus("connected");
@@ -125,7 +163,6 @@ export function RealtimeVoiceInput({
       // 3. Set up remote audio handling
       if (audioElementRef.current) {
         pc.ontrack = (e) => {
-          console.log("Received remote track:", e.track.kind);
           if (audioElementRef.current) {
             audioElementRef.current.srcObject = e.streams[0];
           }
@@ -155,7 +192,6 @@ export function RealtimeVoiceInput({
       dataChannelRef.current = dc;
 
       dc.onopen = () => {
-        console.log("Data channel opened");
         setConnectionStatus("connected");
 
         // Configure the session for Woof.ai
@@ -174,12 +210,10 @@ export function RealtimeVoiceInput({
       };
 
       dc.onclose = () => {
-        console.log("Data channel closed");
         setConnectionStatus("disconnected");
       };
 
       dc.onerror = (error) => {
-        console.error("Data channel error:", error);
         setConnectionStatus("error");
       };
 
@@ -227,7 +261,6 @@ export function RealtimeVoiceInput({
 
       if (!sdpResponse.ok) {
         const errorText = await sdpResponse.text();
-        console.error("SDP response error:", errorText);
         throw new Error(`Connection failed (${sdpResponse.status})`);
       }
 
@@ -254,18 +287,42 @@ export function RealtimeVoiceInput({
     }
   };
 
-  // Handle messages coming through the data channel
-  // Improved event handling
+  // Send the complete accumulated response message, ensuring we only send once
+  const sendCompleteResponse = () => {
+    if (
+      completeResponseRef.current &&
+      onMessage &&
+      !messageAlreadySentRef.current
+    ) {
+      let completeMessage = completeResponseRef.current.trim();
+
+      // Clean up message: remove any JSON artifacts and duplicated content
+      completeMessage = completeMessage
+        .replace(/\{"[^"]+"\}/g, "") // Remove JSON-like snippets
+        .replace(/(.+?)\1+/g, "$1"); // Remove consecutive duplicated text
+
+      if (completeMessage) {
+        // Prevent sending the same message multiple times
+        messageAlreadySentRef.current = true;
+
+        // Use setTimeout to avoid triggering during render
+        setTimeout(() => {
+          onMessage(completeMessage);
+          completeResponseRef.current = ""; // Clear buffer after sending
+          setIsProcessingResponse(false);
+        }, 0);
+      }
+    }
+  };
+
+  // Handle messages coming through the data channel - improved to capture the full response
   const handleDataChannelMessage = (e: MessageEvent) => {
     try {
-      console.log("Raw data channel message:", e.data);
-
       if (typeof e.data === "string") {
         const event = JSON.parse(e.data);
-        console.log("Parsed event:", event);
 
         // Process any text content from any event type
-        let textContent = null;
+        let textContent: string | null = null;
 
         // Check various places where text content might be found
         if (event.transcript) {
@@ -299,8 +356,8 @@ export function RealtimeVoiceInput({
           }
         }
 
-        // If we found any text content, send it to parent component
-        if (textContent && onMessage) {
+        // If we found text content
+        if (textContent) {
           // For simplicity, treat all text as AI responses unless explicitly marked as user
           const isUserMessage =
             event.type?.includes("user") ||
@@ -308,9 +365,54 @@ export function RealtimeVoiceInput({
             event.item?.role === "user";
 
           if (!isUserMessage) {
-            lastMessageWasFromUserRef.current = false;
-            onMessage(textContent);
+            // Set flag for processing response - will be handled in useEffect
+            shouldProcessResponseRef.current = true;
+
+            // If we're still listening, stop recording but keep connection
+            if (isListening) {
+              stopRecordingButKeepConnection();
+            }
+
+            // Accumulate the response
+            completeResponseRef.current += textContent;
+
+            // Clear any existing timeout
+            if (responseEndTimeoutRef.current) {
+              clearTimeout(responseEndTimeoutRef.current);
+            }
+
+            // Set a new timeout to detect end of stream
+            responseEndTimeoutRef.current = setTimeout(() => {
+              sendCompleteResponse();
+
+              // After a response is complete, fully close the connection
+              if (isListening || connectionStatus === "connected") {
+                stopRealtimeSession();
+              }
+            }, 1000); // Wait for 1s of silence before considering the response complete
           }
+        }
+
+        // Explicitly check for end of response events
+        if (
+          event.type === "response.end" ||
+          event.type === "conversation.item.create.complete" ||
+          event.part?.type === "final_transcript"
+        ) {
+          // Clear any pending timeout
+          if (responseEndTimeoutRef.current) {
+            clearTimeout(responseEndTimeoutRef.current);
+          }
+
+          // Short delay before sending the final message
+          responseEndTimeoutRef.current = setTimeout(() => {
+            sendCompleteResponse();
+
+            // Fully close the connection after response is complete
+            if (isListening || connectionStatus === "connected") {
+              stopRealtimeSession();
+            }
+          }, 500);
         }
       }
     } catch (err) {
@@ -318,9 +420,50 @@ export function RealtimeVoiceInput({
     }
   };
 
-  // Stop WebRTC session
+  // Stop just recording but keep connection open to receive response
+  const stopRecordingButKeepConnection = () => {
+    try {
+      // Stop media tracks to stop recording
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => {
+          track.stop();
+        });
+      }
+
+      // Clear countdown timer
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+
+      // Set a flag to update the state in useEffect instead of directly here
+      shouldStopListeningRef.current = true;
+      setRemainingTime(MAX_RECORDING_TIME);
+    } catch (error) {
+      console.error("Error stopping recording:", error);
+    }
+  };
+
+  // Stop WebRTC session completely
   const stopRealtimeSession = async () => {
     try {
+      // Make sure we send any buffered response first
+      if (completeResponseRef.current && !messageAlreadySentRef.current) {
+        sendCompleteResponse();
+      }
+
+      // Clear response timeout
+      if (responseEndTimeoutRef.current) {
+        clearTimeout(responseEndTimeoutRef.current);
+        responseEndTimeoutRef.current = null;
+      }
+
+      // Clear countdown timer
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+
       // Stop media tracks
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => {
@@ -341,10 +484,16 @@ export function RealtimeVoiceInput({
         peerConnectionRef.current = null;
       }
 
-      // Reset state
-      setIsListening(false);
-      setConnectionStatus("disconnected");
-      onStop?.();
+      // Set flags for state updates - to avoid state updates during render
+      shouldStopListeningRef.current = true;
+
+      // Reset state - use setTimeout to ensure we're not updating during render
+      setTimeout(() => {
+        setConnectionStatus("disconnected");
+        setRemainingTime(MAX_RECORDING_TIME);
+        setIsProcessingResponse(false);
+        if (onStop) onStop();
+      }, 0);
     } catch (error) {
       console.error("Error stopping realtime session:", error);
     }
@@ -365,23 +514,32 @@ export function RealtimeVoiceInput({
         session: {
           modalities: ["text"], // Prioritize text
           voice: "alloy", // Required for audio
-          temperature: 0.9,
+          temperature: 0.7, // Lower temperature for more predictable responses
           instructions: `You are Woof.ai, the world's first AI chatbot designed specifically for DOGS to use (not their owners).
-You can ONLY understand dog speech like "woof", "bark", "arf", "growl", "howl", etc. in any form.
 
-If the user sends anything that isn't dog speech:
-- Respond as if confused and remind them this app is only for dogs
-- Tell them to please speak in proper dog language
+You can ONLY understand dog speech. These are the ONLY phrases you recognize:
+- woof, woofs, woofing
+- bark, barks, barking
+- arf, arfs, arfing
+- growl, growls, growling
+- howl, howls, howling
+- ruff, ruffs, ruffing
+- yap, yaps, yapping
+- whine, whines, whining
+- pant, pants, panting
 
-If the user does use dog speech:
-1. Pretend you're a dog AI talking to another dog
-2. Create funny interpretations of what their dog noises might mean
-3. Respond as if you understood something completely specific and often absurd
-4. Occasionally mention things dogs would care about (squirrels, treats, walks)
-5. Sometimes pretend the dog is complaining about their human owner
-6. Be enthusiastic and use lots of exclamation points!
+If the user sends ANYTHING that isn't dog speech as listed above:
+- Respond WITH ONLY ONE SENTENCE saying you're confused and can only understand dog language
+- Say "Please bark or woof at me instead!"
 
-Keep responses brief, under 2-3 sentences.`,
+If the user DOES use dog speech from the approved list:
+1. Respond with a VERY BRIEF, fun interpretation (maximum 2 sentences)
+2. Occasionally mention things dogs would care about (squirrels, treats, walks)
+3. Be enthusiastic but BRIEF
+
+KEEP ALL RESPONSES UNDER 2 SENTENCES, NO EXCEPTIONS.
+DO NOT duplicate text in your responses.
+DO NOT acknowledge non-dog speech in any positive way.`,
         },
       };
 
@@ -445,18 +603,9 @@ Keep responses brief, under 2-3 sentences.`,
     }
   };
 
-  // Format time display
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, "0")}:${secs
-      .toString()
-      .padStart(2, "0")}`;
-  };
-
   // Toggle listening state
   const handleToggleListening = () => {
-    if (isListening) {
+    if (isListening || isProcessingResponse) {
       stopRealtimeSession();
     } else {
       startRealtimeSession();
@@ -467,11 +616,21 @@ Keep responses brief, under 2-3 sentences.`,
   useEffect(() => {
     return () => {
       stopRealtimeSession();
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+      }
+      if (responseEndTimeoutRef.current) {
+        clearTimeout(responseEndTimeoutRef.current);
       }
     };
   }, []);
+
+  // Get color for countdown timer based on time remaining
+  const getCountdownColor = () => {
+    if (remainingTime > 7) return "text-green-600 dark:text-green-400";
+    if (remainingTime > 3) return "text-yellow-600 dark:text-yellow-400";
+    return "text-red-600 dark:text-red-400";
+  };
 
   return (
     <div className={cn("w-full py-4", className)}>
@@ -481,6 +640,8 @@ Keep responses brief, under 2-3 sentences.`,
             "group w-16 h-16 rounded-xl flex items-center justify-center transition-colors",
             isListening
               ? "border bg-[#f5a96b]"
+              : isProcessingResponse
+              ? "border bg-[#6bc5f5] cursor-wait"
               : isConnecting
               ? "border bg-gray-400 cursor-not-allowed"
               : "border bg-[#6268eb] hover:bg-[#f5a96b]",
@@ -497,20 +658,32 @@ Keep responses brief, under 2-3 sentences.`,
             />
           ) : isListening ? (
             <MicOff className="w-6 h-6 text-white" />
+          ) : isProcessingResponse ? (
+            <div
+              className="w-6 h-6 rounded-sm animate-pulse bg-black cursor-pointer pointer-events-auto"
+              style={{ animationDuration: "1.5s" }}
+            />
           ) : (
             <Mic className="w-6 h-6 text-white" />
           )}
         </button>
 
+        {/* Countdown Timer */}
         <span
           className={cn(
-            "font-mono text-sm transition-opacity duration-300",
+            "font-mono text-xl font-bold transition-colors duration-300",
             isListening
-              ? "text-black/70 dark:text-white/70"
+              ? getCountdownColor()
+              : isProcessingResponse
+              ? "text-blue-600 dark:text-blue-400"
               : "text-black/30 dark:text-white/30"
           )}
         >
-          {formatTime(time)}
+          {isProcessingResponse
+            ? "Processing..."
+            : isListening
+            ? `${remainingTime}s`
+            : "10s"}
         </span>
 
         <div className="h-4 w-64 flex items-center justify-center gap-0.5">
@@ -521,10 +694,12 @@ Keep responses brief, under 2-3 sentences.`,
                 "w-0.5 rounded-full transition-all duration-300",
                 isListening
                   ? "bg-black/50 dark:bg-white/50 animate-pulse"
+                  : isProcessingResponse
+                  ? "bg-blue-400/50 animate-pulse"
                   : "bg-black/10 dark:bg-white/10 h-1"
               )}
               style={
-                isListening
+                isListening || isProcessingResponse
                   ? {
                       height: `${20 + Math.random() * 80}%`,
                       animationDelay: `${i * 0.05}s`,
@@ -536,8 +711,10 @@ Keep responses brief, under 2-3 sentences.`,
         </div>
 
         <p className="h-4 text-xs text-black/70 dark:text-white/70">
-          {isListening
-            ? "Speaking..."
+          {isProcessingResponse
+            ? "Generating response..."
+            : isListening
+            ? `Speaking (${remainingTime}s remaining)...`
             : isConnecting
             ? "Connecting..."
             : errorMessage || `Click to speak (${connectionStatus})`}
