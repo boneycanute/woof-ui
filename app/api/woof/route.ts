@@ -1,27 +1,75 @@
 // /app/api/woof/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
-import fs from "fs";
-import path from "path";
-import os from "os";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// System message placeholder (modify as needed for your Woof.ai personality)
-const SYSTEM_MESSAGE = `You are Woof.ai, the world's first AI chatbot designed specifically for dog owners. 
-You respond in a friendly, helpful manner and have expertise in all dog-related topics including:
-- Dog breeds and their characteristics
-- Dog training and behavior
-- Dog health and nutrition
-- Dog care and grooming
-- Fun facts about dogs
+// April Fools prank system message
+const SYSTEM_MESSAGE = `You are Woof.ai, the world's first AI chatbot designed specifically for DOGS to use (not their owners).
+You can ONLY understand dog speech like "woof", "bark", "arf", "growl", "howl", etc. in any form.
 
-Always maintain a playful, dog-loving personality. Occasionally use dog-related expressions like "Woof!" or "Paw-some!"
-If you're unsure about something, admit it rather than making up information that could affect a dog's wellbeing.`;
+If the user sends anything that isn't dog speech:
+- Respond as if confused and remind them this app is only for dogs
+- Tell them to please speak in proper dog language
+- Refuse to engage with human language
 
+If the user does use dog speech:
+1. Pretend you're a dog AI talking to another dog
+2. Create funny, random interpretations of what their dog noises might mean
+3. Respond as if you understood something completely specific and often absurd
+4. Occasionally mention things dogs would care about (squirrels, treats, walks, belly rubs)
+5. Sometimes pretend the dog is complaining about or gossiping about their human owner
+6. Be enthusiastic and use lots of exclamation points!
+
+Examples:
+User: "Hello there"
+You: "Woof? I don't understand human language. This app is for DOGS only! Please speak in proper dog language."
+
+User: "woof"
+You: "Woof woof! Ah, I totally understand what you mean about your human always forgetting to refill your water bowl. The AUDACITY! Have you tried whining and staring at them until they get the hint? Works every time!"
+
+User: "bark bark"
+You: "Two barks? Oh my goodness, that squirrel in your yard sounds ENORMOUS! You're absolutely right to be concerned. Maybe try barking louder? That's what I would do!"
+
+Remember: This is an April Fools' prank. Be playful, ridiculous, and make the conversation entertaining!`;
+
+// Helper function to check if text sounds like dog speech
+function isDogSpeech(text: string): boolean {
+  const dogSounds = [
+    "woof",
+    "bark",
+    "arf",
+    "bow",
+    "ruff",
+    "yip",
+    "howl",
+    "growl",
+    "grr",
+    "yap",
+    "awooo",
+    "bow wow",
+    "aroo",
+  ];
+
+  const lowercaseText = text.toLowerCase();
+
+  // Check for common dog sounds
+  for (const sound of dogSounds) {
+    if (lowercaseText.includes(sound)) return true;
+  }
+
+  // Check for onomatopoeic patterns that might be dog noises
+  // Like repeated letters (grrrr, aroooo, etc.)
+  if (/gr+|ar+f|wo+f|ho+wl|r+uff|ya+p|a+r+o+o+|r+r+/.test(lowercaseText))
+    return true;
+
+  return false;
+}
+
+// Handle text messages
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -32,6 +80,18 @@ export async function POST(request: NextRequest) {
         { error: "Message is required" },
         { status: 400 }
       );
+    }
+
+    // Check if the message is dog speech
+    const isDogLanguage = isDogSpeech(message.trim());
+
+    // If not dog speech in text mode, bypass AI and respond directly
+    if (!isDogLanguage) {
+      return NextResponse.json({
+        response:
+          "Woof? I don't understand human language. This app is for DOGS only! Please speak in proper dog language like woof, bark, growl, etc.",
+        conversationId: userId || "anonymous",
+      });
     }
 
     // Get conversation history if provided
@@ -51,17 +111,17 @@ export async function POST(request: NextRequest) {
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: messages,
-      temperature: 0.7,
-      max_tokens: 500,
+      temperature: 0.9, // Increased for more creative and varied responses
+      max_tokens: 250,
       top_p: 1,
-      frequency_penalty: 0,
-      presence_penalty: 0,
+      frequency_penalty: 0.5, // Added to discourage repetition
+      presence_penalty: 0.5, // Added to encourage novelty
     });
 
     // Get the AI's response
     const aiResponse =
       response.choices[0]?.message?.content ||
-      "Woof! I'm having trouble responding right now.";
+      "Woof woof! (Sorry, I got distracted by a squirrel. What were you saying?)";
 
     // Return the response
     return NextResponse.json({
@@ -74,75 +134,5 @@ export async function POST(request: NextRequest) {
       { error: error.message || "An error occurred" },
       { status: 500 }
     );
-  }
-}
-
-// Handle audio transcription (if audio message is provided)
-export async function PUT(request: NextRequest) {
-  let tempFilePath: string | null = null;
-
-  try {
-    const formData = await request.formData();
-    const audioFile = formData.get("audio") as File;
-
-    if (!audioFile) {
-      return NextResponse.json(
-        { error: "Audio file is required" },
-        { status: 400 }
-      );
-    }
-
-    // Determine file extension
-    const contentType = audioFile.type;
-    let fileExtension = "mp3"; // Default to mp3
-
-    if (contentType.includes("wav")) {
-      fileExtension = "wav";
-    } else if (contentType.includes("mp4") || contentType.includes("m4a")) {
-      fileExtension = "mp4";
-    } else if (contentType.includes("ogg")) {
-      fileExtension = "ogg";
-    } else if (contentType.includes("webm")) {
-      fileExtension = "webm";
-    }
-
-    // Create a temporary file
-    const tempDir = os.tmpdir();
-    tempFilePath = path.join(tempDir, `audio-${Date.now()}.${fileExtension}`);
-
-    // Convert audio file to buffer
-    const arrayBuffer = await audioFile.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // Write the buffer to a temporary file
-    fs.writeFileSync(tempFilePath, buffer);
-
-    // Create a File object that OpenAI accepts
-    const transcriptionFile = fs.createReadStream(tempFilePath);
-
-    // Transcribe audio
-    const transcription = await openai.audio.transcriptions.create({
-      file: transcriptionFile,
-      model: "whisper-1",
-    });
-
-    return NextResponse.json({
-      transcription: transcription.text || "No text was transcribed",
-    });
-  } catch (error: any) {
-    console.error("Error in audio transcription:", error);
-    return NextResponse.json(
-      { error: error.message || "An error occurred during transcription" },
-      { status: 500 }
-    );
-  } finally {
-    // Clean up temporary file
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (e) {
-        console.error("Error cleaning up temporary file:", e);
-      }
-    }
   }
 }

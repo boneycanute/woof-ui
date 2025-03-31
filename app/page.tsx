@@ -1,6 +1,5 @@
-// /app/page.tsx
 "use client";
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Mic, MessageSquare } from "lucide-react";
 
@@ -16,8 +15,8 @@ import {
   ChatInputTextArea,
   ChatInputSubmit,
 } from "@/components/woof-ui/chat-input";
-import { AIVoiceInput } from "@/components/woof-ui/ai-voice-input";
 import { Badge } from "@/components/woof-ui/badge";
+import { RealtimeVoiceInput } from "@/components/woof-ui/realtime-voice-input";
 
 // Define message type
 interface Message {
@@ -51,7 +50,6 @@ async function sendMessageToWoofAI(
       },
       body: JSON.stringify({
         message,
-        messageType: "text",
         conversationHistory: formattedHistory,
         userId: localStorage.getItem("woofUserId") || "anonymous-user",
       }),
@@ -79,16 +77,37 @@ const inputTabs = [
 export default function ChatInterface() {
   // State
   const [activeTab, setActiveTab] = useState<string>("text");
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [textMessages, setTextMessages] = useState<Message[]>([]);
+  const [voiceMessages, setVoiceMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [messagesRemaining, setMessagesRemaining] = useState(10);
-  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
+  const [textMessagesRemaining, setTextMessagesRemaining] = useState(5);
+  const [voiceMessagesRemaining, setVoiceMessagesRemaining] = useState(5);
+  const [isVoiceSessionActive, setIsVoiceSessionActive] = useState(false);
   const messageIdCounter = useRef(0);
 
-  // Audio recording refs
-  const audioRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  // Get active messages and messages remaining based on current tab
+  const activeMessages = activeTab === "text" ? textMessages : voiceMessages;
+  const activeMessagesRemaining =
+    activeTab === "text" ? textMessagesRemaining : voiceMessagesRemaining;
+
+  // Set user ID on first load
+  useEffect(() => {
+    const savedUserId = localStorage.getItem("woofUserId");
+    const messagesRemaining = localStorage.getItem("woofMessagesRemaining");
+    if (!savedUserId) {
+      const newUserId = `user-${Math.random().toString(36).substring(2, 15)}`;
+      localStorage.setItem("woofUserId", newUserId);
+    }
+    if (!messagesRemaining) {
+      localStorage.setItem("woofMessagesRemaining", "90");
+    }
+    console.log("User ID:", savedUserId);
+    console.log("Messages remaining:", messagesRemaining);
+    const remaining = parseInt(messagesRemaining || "5", 10);
+    setVoiceMessagesRemaining(remaining);
+    setTextMessagesRemaining(remaining);
+  }, []);
 
   // Generate unique message ID
   const generateMessageId = () => {
@@ -101,9 +120,10 @@ export default function ChatInterface() {
     setInputValue(e.target.value);
   };
 
-  // Handle message submission
-  const handleSubmit = async () => {
-    if (inputValue.trim() === "" || messagesRemaining <= 0 || isLoading) return;
+  // Handle message submission for text chat
+  const handleTextSubmit = async () => {
+    if (inputValue.trim() === "" || textMessagesRemaining <= 0 || isLoading)
+      return;
 
     // Add user message
     const newUserMessage: Message = {
@@ -114,17 +134,17 @@ export default function ChatInterface() {
     };
 
     // Update messages state with user message
-    setMessages((prev) => [...prev, newUserMessage]);
+    setTextMessages((prev) => [...prev, newUserMessage]);
     const userInput = inputValue; // Store the input value
     setInputValue("");
     setIsLoading(true);
-    setMessagesRemaining((prev) => prev - 1);
+    setTextMessagesRemaining((prev) => prev - 1);
 
     try {
       // Send request to the API with conversation history
       const aiResponseText = await sendMessageToWoofAI(
         userInput,
-        messages // Pass current conversation history
+        textMessages // Pass current conversation history
       );
 
       // Create AI response message
@@ -136,7 +156,7 @@ export default function ChatInterface() {
       };
 
       // Update messages state with AI response
-      setMessages((prev) => [...prev, aiResponse]);
+      setTextMessages((prev) => [...prev, aiResponse]);
     } catch (error) {
       console.error("Error getting response:", error);
 
@@ -149,154 +169,79 @@ export default function ChatInterface() {
         timestamp: new Date(),
       };
 
-      setMessages((prev) => [...prev, errorMessage]);
+      setTextMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Handle voice input
+  // Handle voice session start
   const handleVoiceStart = () => {
-    console.log("Voice recording started");
-    // Set flag to prevent multiple submissions
-    setIsVoiceProcessing(true);
-    audioChunksRef.current = [];
-
-    // Start recording
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then((stream) => {
-        // Use audio/webm MIME type for better compatibility with Whisper
-        const options = { mimeType: "audio/webm" };
-
-        // Check if this MIME type is supported
-        if (MediaRecorder.isTypeSupported("audio/webm")) {
-          audioRecorderRef.current = new MediaRecorder(stream, options);
-        } else {
-          // Fallback to default
-          audioRecorderRef.current = new MediaRecorder(stream);
-        }
-
-        audioRecorderRef.current.addEventListener("dataavailable", (event) => {
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
-          }
-        });
-
-        audioRecorderRef.current.start();
-      })
-      .catch((err) => {
-        console.error("Error accessing microphone:", err);
-        setIsVoiceProcessing(false);
-      });
+    setIsVoiceSessionActive(true);
   };
 
-  const handleVoiceStop = async (duration: number) => {
-    // Prevent duplicate submissions
-    if (
-      !isVoiceProcessing ||
-      isLoading ||
-      messagesRemaining <= 0 ||
-      !audioRecorderRef.current
-    ) {
-      return;
+  // Handle voice session stop
+  const handleVoiceStop = () => {
+    setIsVoiceSessionActive(false);
+  };
+
+  // Handle voice messages from realtime API
+  const handleVoiceMessage = (transcript: string) => {
+    if (voiceMessagesRemaining <= 0) return;
+
+    // Create a new message based on who sent it (determined by context)
+    // If this is a user message from RealtimeVoiceInput, it will be marked as 'user'
+    // If this is an AI response, it will be marked as 'ai'
+    const message: Message = {
+      id: generateMessageId(),
+      content: transcript,
+      // The RealtimeVoiceInput component will send both user transcripts and AI responses,
+      // but we can't reliably distinguish them here, so we'll always treat them as AI messages
+      // and let the component handle user messages internally
+      sender: "ai",
+      timestamp: new Date(),
+    };
+
+    // Update voice messages state
+    setVoiceMessages((prev) => [...prev, message]);
+
+    // Decrement message count only if we haven't already counted this message
+    if (voiceMessagesRemaining > 0 && message.sender === "ai") {
+      setVoiceMessagesRemaining((prev) => Math.max(0, prev - 1));
+    }
+  };
+
+  // Handle tab switching
+  const handleTabSwitch = (tabId: string) => {
+    if (activeTab === tabId) return;
+
+    // If switching from voice to text, ensure voice session is stopped
+    if (activeTab === "voice" && isVoiceSessionActive) {
+      setIsVoiceSessionActive(false);
     }
 
-    try {
-      setIsLoading(true);
+    setActiveTab(tabId);
+  };
 
-      // Create a promise to wait for the recording to stop
-      const recordingStopped = new Promise<Blob>((resolve) => {
-        if (audioRecorderRef.current) {
-          audioRecorderRef.current.addEventListener("stop", () => {
-            // Use webm format for better compatibility
-            const audioBlob = new Blob(audioChunksRef.current, {
-              type: "audio/webm",
-            });
-            resolve(audioBlob);
-          });
-
-          audioRecorderRef.current.stop();
-        }
-      });
-
-      // Wait for the recording to stop and get the audio blob
-      const audioBlob = await recordingStopped;
-
-      // Add user message for voice
-      const newUserMessage: Message = {
-        id: generateMessageId(),
-        content: `[Voice message: ${duration} seconds]`,
-        sender: "user",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, newUserMessage]);
-      setMessagesRemaining((prev) => prev - 1);
-
-      // First, transcribe the audio
-      const formData = new FormData();
-      formData.append("audio", audioBlob);
-
-      const transcriptionResponse = await fetch("/api/woof", {
-        method: "PUT",
-        body: formData,
-      });
-
-      if (!transcriptionResponse.ok) {
-        throw new Error("Failed to transcribe audio");
-      }
-
-      const transcriptionData = await transcriptionResponse.json();
-      const transcribedText = transcriptionData.transcription;
-
-      if (!transcribedText) {
-        throw new Error("No text was transcribed from the audio");
-      }
-
-      // Now send the transcribed text to get an AI response
-      const responseData = await sendMessageToWoofAI(transcribedText, messages);
-
-      // Add AI response message
-      const aiResponse: Message = {
-        id: generateMessageId(),
-        content: responseData,
-        sender: "ai",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, aiResponse]);
-    } catch (error) {
-      console.error("Error processing voice message:", error);
-
-      // Add AI error response
-      const errorMessage: Message = {
+  useEffect(() => {
+    // If there are no voice messages yet, add an initial system message
+    if (activeTab === "voice" && voiceMessages.length === 0) {
+      const welcomeMessage: Message = {
         id: generateMessageId(),
         content:
-          "Woof! I had trouble understanding your voice message. Could you try again or type your message?",
+          "Woof! Welcome to voice chat. Press the microphone button to start talking.",
         sender: "ai",
         timestamp: new Date(),
       };
-
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setIsLoading(false);
-      setIsVoiceProcessing(false);
-
-      // Clean up
-      if (audioRecorderRef.current && audioRecorderRef.current.stream) {
-        audioRecorderRef.current.stream
-          .getTracks()
-          .forEach((track) => track.stop());
-      }
+      setVoiceMessages([welcomeMessage]);
     }
-  };
+  }, [activeTab, voiceMessages.length]);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
       {/* Main layout with fixed sections */}
       <motion.div className="flex flex-col h-full">
-        {messages.length != 0 ? (
+        {activeMessages.length !== 0 ? (
           <motion.div
             className="w-full max-w-2xl mx-auto px-4 flex items-center justify-between"
             initial={{ opacity: 0, y: -20 }}
@@ -315,7 +260,7 @@ export default function ChatInterface() {
               variant="outline"
               className="bg-background/80 backdrop-blur-sm"
             >
-              {messagesRemaining} messages remaining
+              {activeMessagesRemaining} messages remaining
             </Badge>
           </motion.div>
         ) : (
@@ -324,7 +269,7 @@ export default function ChatInterface() {
         {/* Chat messages container - takes all available space */}
         <div className="flex-1 overflow-hidden flex justify-center pt-2">
           <div className="w-full max-w-2xl relative">
-            {messages.length === 0 ? (
+            {activeMessages.length === 0 ? (
               <motion.div
                 className="absolute inset-0 flex flex-col items-center justify-center"
                 initial={{ opacity: 0 }}
@@ -346,7 +291,7 @@ export default function ChatInterface() {
             ) : (
               <div className="h-full">
                 <ChatMessageList smooth>
-                  {messages.map((message) => (
+                  {activeMessages.map((message) => (
                     <ChatBubble
                       key={message.id}
                       variant={message.sender === "user" ? "sent" : "received"}
@@ -398,11 +343,7 @@ export default function ChatInterface() {
                     key={tab.id}
                     onClick={() => {
                       if (!isLoading) {
-                        setActiveTab(tab.id);
-                        // Reset voice processing flag when switching tabs
-                        if (tab.id === "voice") {
-                          setIsVoiceProcessing(false);
-                        }
+                        handleTabSwitch(tab.id);
                       }
                     }}
                     disabled={isLoading}
@@ -433,16 +374,16 @@ export default function ChatInterface() {
                   <ChatInput
                     value={inputValue}
                     onChange={handleInputChange}
-                    onSubmit={handleSubmit}
+                    onSubmit={handleTextSubmit}
                     loading={isLoading}
                     className="rounded-xl mb-4 "
                   >
                     <ChatInputTextArea
-                      placeholder="Type a message..."
-                      disabled={isLoading || messagesRemaining <= 0}
+                      placeholder="Type woof, bark, growl..."
+                      disabled={isLoading || textMessagesRemaining <= 0}
                     />
                     <ChatInputSubmit
-                      disabled={isLoading || messagesRemaining <= 0}
+                      disabled={isLoading || textMessagesRemaining <= 0}
                     />
                   </ChatInput>
                 </motion.div>
@@ -455,20 +396,19 @@ export default function ChatInterface() {
                   transition={{ duration: 0.2 }}
                   layout
                 >
-                  {messagesRemaining > 0 && !isLoading ? (
+                  {voiceMessagesRemaining > 0 ? (
                     <div className="border border-input rounded-xl bg-background mb-4">
-                      <AIVoiceInput
+                      <RealtimeVoiceInput
                         onStart={handleVoiceStart}
                         onStop={handleVoiceStop}
+                        onMessage={handleVoiceMessage}
                         visualizerBars={32}
-                        demoMode={false}
+                        disabled={voiceMessagesRemaining <= 0}
                       />
                     </div>
                   ) : (
                     <div className="p-4 border border-input rounded-xl text-center text-muted-foreground mb-4">
-                      {isLoading
-                        ? "Processing your voice message..."
-                        : "No messages remaining"}
+                      No messages remaining
                     </div>
                   )}
                 </motion.div>
