@@ -245,7 +245,15 @@ export default function ChatInterface() {
   }, [activeTab, voiceMessages.length]);
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-background">
+    <div
+      className="flex flex-col h-screen overflow-hidden"
+      style={{
+        backgroundImage: "url('/bg-2.png')",
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+        backgroundRepeat: "no-repeat",
+      }}
+    >
       {/* Main layout with fixed sections */}
       <motion.div className="flex flex-col h-full">
         {activeMessages.length !== 0 ? (
@@ -290,7 +298,7 @@ export default function ChatInterface() {
                     className="w-48 h-48 object-cover rounded-full"
                   />
                 </div>
-                <p className="text-muted-foreground text-center space-y-4 ">
+                <p className="text-muted-foreground text-2xl font-bold text-center space-y-4 bg-background/90 backdrop-blur-md p-4 rounded-lg shadow-2xl shadow-white">
                   World's First AI Chatbot for Dogs <br />{" "}
                   <span className="block mt-1">Fluent in Woof!🐾</span>
                 </p>
@@ -340,7 +348,7 @@ export default function ChatInterface() {
         </div>
 
         {/* Fixed bottom section with input controls - does not scroll */}
-        <div className="bg-background">
+        <div className="">
           <div className="max-w-2xl mx-auto w-full px-4 pt-4">
             {/* Tabs for input selection */}
             <motion.div className="flex justify-center mb-4" layout>
@@ -383,7 +391,7 @@ export default function ChatInterface() {
                     onChange={handleInputChange}
                     onSubmit={handleTextSubmit}
                     loading={isLoading}
-                    className="rounded-xl mb-4 "
+                    className="rounded-xl mb-4 bg-white "
                   >
                     <ChatInputTextArea
                       placeholder="Type woof, bark, growl..."
